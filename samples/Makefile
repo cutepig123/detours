@@ -81,6 +81,8 @@ all:
     @$(MAKE) /NOLOGO /$(MAKEFLAGS)
     cd "$(MAKEDIR)\tracetcp"
     @$(MAKE) /NOLOGO /$(MAKEFLAGS)
+	cd "$(MAKEDIR)\tracetcp-sockscap"
+    @$(MAKE) /NOLOGO /$(MAKEFLAGS)
     cd "$(MAKEDIR)\tracelnk"
     @$(MAKE) /NOLOGO /$(MAKEFLAGS)
 !IF "$(DETOURS_TARGET_PROCESSOR)" != "ARM" && "$(DETOURS_TARGET_PROCESSOR)" != "ARM64"
