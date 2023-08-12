@@ -18,6 +18,7 @@
 #endif
 #include <windows.h>
 #include <stdio.h>
+#include <assert.h>
 #include "detours.h"
 #include "syelog.h"
 
@@ -948,7 +949,7 @@ INT WINAPI Mine_WSALookupServiceBeginW(
                 lpqsRestrictions,
                 dwControlFlags,
                 lphLookup);
-    __debugbreak();
+    //__debugbreak();
 
     INT rv = 0;
     __try {
@@ -1267,13 +1268,64 @@ int WINAPI Mine_closesocket(SOCKET a0)
     return rv;
 }
 
+void Real_recvHttpLine(SOCKET a0,
+    char* response,
+    int nSize,
+    int /*a3*/)
+{
+    const char* ends = "\r\n\r\n";
+    for (int i = 0; i < nSize; i++)
+    {
+        int nBytesRecv = Real_recv(a0, response+i, 1, 0);
+        assert(nBytesRecv ==1);
+
+        if (strstr(response, ends)>0)
+        {
+            return;
+        }
+    }
+    assert(0);
+}
+int WINAPI Mine_connect_ViaHttpProxy(SOCKET a0,
+    sockaddr* name,
+    int /*namelen*/)
+{
+    // proxy
+    sockaddr_in proxySockAddr;
+    proxySockAddr.sin_family = AF_INET;
+    proxySockAddr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    proxySockAddr.sin_port = htons(8000);
+
+    int rv = Real_connect(a0, (SOCKADDR*) & proxySockAddr, sizeof(proxySockAddr));
+    assert(rv != SOCKET_ERROR);
+
+    //
+    char msg[100] = { 0 };
+    const sockaddr_in* destSockAddr = (const sockaddr_in*)name;
+    const char* host = inet_ntoa(destSockAddr->sin_addr);
+    int port = ntohs(destSockAddr->sin_port);
+    _snprintf_s(msg, 100,"CONNECT %s:%d HTTP/1.1\r\n\r\n",host, port);
+    //    logging.debug('send {}'.format(msg))
+    //    sock.sendall(msg.encode())
+    int nBytesSent = Real_send(a0, msg, (int)strlen(msg), 0);
+    assert(nBytesSent != SOCKET_ERROR);
+        //response = sock.recv(1024).decode()
+        //logging.debug('recv {}'.format(response))
+        //assert '200' in response
+    char response[1024] = {0};
+    Real_recvHttpLine(a0, response, (int)sizeof(response), 0);
+    assert(strstr(response, "200") > 0);
+
+    return rv;
+}
+
 int WINAPI Mine_connect(SOCKET a0,
                         sockaddr* name,
                         int namelen)
 {
     int rv = 0;
     __try {
-        rv = Real_connect(a0, name, namelen);
+        rv = Mine_connect_ViaHttpProxy(a0, name, namelen);
     } __finally {
         WCHAR wzAddress[512];
         DWORD nAddress = ARRAYSIZE(wzAddress);
