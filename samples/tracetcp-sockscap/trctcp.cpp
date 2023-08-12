@@ -19,6 +19,7 @@
 #include <windows.h>
 #include <stdio.h>
 #include <assert.h>
+#include <vector>
 #include "detours.h"
 #include "syelog.h"
 
@@ -428,6 +429,54 @@ int (WINAPI * Real_send)(SOCKET a0,
                          int a2,
                          int a3)
     = send;
+
+void xor_inplace(char* p, size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+    {
+        p[i] = ~p[i];
+    }
+}
+
+std::vector<char> xor_ret(const char* p, size_t n)
+{
+    std::vector<char> encoded(n);
+    for (int i = 0; i < n; i++)
+    {
+        encoded[i] = ~p[i];
+    }
+    return encoded;
+}
+
+int WINAPI Real_send_xor(SOCKET a0,
+    CONST char* a1,
+    int a2,
+    int a3)
+{
+    assert(a2 >= 0);
+
+    if (a2>0)
+    {
+        std::vector<char> encoded = xor_ret(a1, (size_t)a2);
+        return Real_send(a0, &encoded[0], a2, a3);
+    }
+    return Real_send(a0, a1, a2, a3);
+}
+
+
+int WINAPI Real_recv_xor(SOCKET a0,
+    char* a1,
+    int a2,
+    int a3)
+{
+    int n = Real_recv(a0, a1, a2, a3);
+
+    if (n > 0)
+    {
+        xor_inplace(a1, (size_t)n);
+    }
+    return n;
+}
 
 int (WINAPI * Real_sendto)(SOCKET a0,
                            CONST char* a1,
@@ -1276,6 +1325,7 @@ void Real_recvHttpLine(SOCKET a0,
     const char* ends = "\r\n\r\n";
     for (int i = 0; i < nSize; i++)
     {
+        // during connectiuon, no need encrypt
         int nBytesRecv = Real_recv(a0, response+i, 1, 0);
         assert(nBytesRecv ==1);
 
@@ -1288,13 +1338,43 @@ void Real_recvHttpLine(SOCKET a0,
 }
 int WINAPI Mine_connect_ViaHttpProxy(SOCKET a0,
     sockaddr* name,
-    int /*namelen*/)
+    int namelen)
 {
     // proxy
+    char httpProxy[100] = { 0 };
+    DWORD nRet = GetPrivateProfileString(
+        "section",
+        "http-proxy-ip",
+        "",
+        httpProxy,
+        sizeof(httpProxy),
+        ".\\config.ini"
+    );
+    assert(nRet > 0);
+    char httpProxyPort[100] = { 0 };
+    nRet = GetPrivateProfileString(
+        "section",
+        "http-proxy-port",
+        "",
+        httpProxyPort,
+        sizeof(httpProxyPort),
+        ".\\config.ini"
+    );
+    assert(nRet > 0);
+
+    if (strlen(httpProxy)==0 || strlen(httpProxyPort) == 0)
+    {
+        Syelog(SYELOG_SEVERITY_INFORMATION, "Direct connect");
+        int rv = Real_connect(a0, name, namelen);
+        return rv;
+    }
+
     sockaddr_in proxySockAddr;
     proxySockAddr.sin_family = AF_INET;
-    proxySockAddr.sin_addr.s_addr = inet_addr("127.0.0.1");
-    proxySockAddr.sin_port = htons(8000);
+    proxySockAddr.sin_addr.s_addr = inet_addr(httpProxy);
+    proxySockAddr.sin_port = htons((u_short)atoi(httpProxyPort));
+
+    Syelog(SYELOG_SEVERITY_INFORMATION, "Connect to http proxy %s:%s", httpProxy, httpProxyPort);
 
     int rv = Real_connect(a0, (SOCKADDR*) & proxySockAddr, sizeof(proxySockAddr));
     assert(rv != SOCKET_ERROR);
@@ -1305,6 +1385,7 @@ int WINAPI Mine_connect_ViaHttpProxy(SOCKET a0,
     const char* host = inet_ntoa(destSockAddr->sin_addr);
     int port = ntohs(destSockAddr->sin_port);
     _snprintf_s(msg, 100,"CONNECT %s:%d HTTP/1.1\r\n\r\n",host, port);
+    Syelog(SYELOG_SEVERITY_INFORMATION, "Send to http proxy %s", msg);
     //    logging.debug('send {}'.format(msg))
     //    sock.sendall(msg.encode())
     int nBytesSent = Real_send(a0, msg, (int)strlen(msg), 0);
@@ -1314,6 +1395,7 @@ int WINAPI Mine_connect_ViaHttpProxy(SOCKET a0,
         //assert '200' in response
     char response[1024] = {0};
     Real_recvHttpLine(a0, response, (int)sizeof(response), 0);
+    Syelog(SYELOG_SEVERITY_INFORMATION, "Recv from http proxy %s", response);
     assert(strstr(response, "200") > 0);
 
     return rv;
@@ -1379,7 +1461,7 @@ int WINAPI Mine_recv(SOCKET a0,
 
     int rv = 0;
     __try {
-        rv = Real_recv(a0, a1, a2, a3);
+        rv = Real_recv_xor(a0, a1, a2, a3);
     } __finally {
         _PrintExit("%p: recv(,%s,,) -> %x\n", a0, a1, rv);
     };
@@ -1490,7 +1572,7 @@ int WINAPI Mine_send(SOCKET a0,
 
     int rv = 0;
     __try {
-        rv = Real_send(a0, a1, a2, a3);
+        rv = Real_send_xor(a0, a1, a2, a3);
     } __finally {
         if (rv == SOCKET_ERROR) {
             int err = WSAGetLastError();
